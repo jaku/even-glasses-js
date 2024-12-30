@@ -6,12 +6,18 @@
 <body>
     <h1>Bluetooth Glasses Controller</h1>
     
-    <button id="scanButton">Scan for Devices</button>
+    <button id="scanButton">Connect Devices</button>
     <button id="sendTextButton" disabled>Send Text</button>
-    <button id="disconnectButton">Disconnect Devices</button>
-    
+    <button id="disconnectButton">Disconnect</button>
+
     <div id="status"></div>
     <input type="text" id="messageInput" placeholder="Enter message to send">
+
+    <div>
+        <label>Left Eye BMP: <input type="file" id="leftBmpInput" accept=".bmp"></label>
+        <label>Right Eye BMP: <input type="file" id="rightBmpInput" accept=".bmp"></label>
+        <button id="sendBmpButton" disabled>Send BMPs</button>
+    </div>
 
     <script src="bluetooth.js"></script>
 </body>
