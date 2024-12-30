@@ -8,8 +8,8 @@ const SERVICE_UUID =  "6e400001-b5a3-f393-e0a9-e50e24dcca9e"
 const WRITE_CHARACTERISTIC_UUID = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"
 const READ_CHARACTERISTIC_UUID = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"
 
-const LEFT_PREFIX = "Even G1_67_L";
-const RIGHT_PREFIX = "Even G1_67_R";
+const LEFT_PREFIX = "Even G1_";
+const RIGHT_PREFIX = "Even G1_";
 
 const BMP_DATA_COMMAND = 0x15;
 const BMP_END_COMMAND = 0x20;
