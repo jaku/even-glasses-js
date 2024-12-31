@@ -3,7 +3,6 @@ let rightDevice = null;
 const TEXT_COMMAND = 0x4E;
 const SCREEN_STATUS = 0x71;  // 0x70 (Text Show) | 0x01 (Display new content)
 
-
 const SERVICE_UUID =  "6e400001-b5a3-f393-e0a9-e50e24dcca9e"
 const WRITE_CHARACTERISTIC_UUID = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"
 const READ_CHARACTERISTIC_UUID = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"
@@ -16,6 +15,15 @@ const BMP_END_COMMAND = 0x20;
 const BMP_CRC_COMMAND = 0x16;
 const BMP_ADDRESS = [0x00, 0x1c, 0x00, 0x00];
 const BMP_PACKET_SIZE = 194;
+
+const HEARTBEAT_COMMAND = 0x25;
+const HEARTBEAT_INTERVAL = 5000; 
+let heartbeatSeq = 0;
+
+let heartbeatIntervals = {
+    left: null,
+    right: null
+};
 
 const CRC32_TABLE = new Uint32Array(256);
 
@@ -46,24 +54,189 @@ function crc32(data) {
     ]);
 }
 
+const MAX_RECONNECT_ATTEMPTS = 3;
+const RECONNECT_DELAY = 1000; // 1 second
+
+async function sendHeartbeat(deviceInfo, side) {
+    try {
+        if (!deviceInfo.device.gatt.connected) {
+            console.log(`${side} device disconnected, attempting reconnect...`);
+            await reconnectDevice(deviceInfo, side);
+            return;
+        }
+
+        const length = 6;
+        const seq = heartbeatSeq % 0xff;
+        
+        const packet = new Uint8Array([
+            HEARTBEAT_COMMAND,
+            length & 0xff,
+            (length >> 8) & 0xff,
+            seq,
+            0x04,
+            seq
+        ]);
+        
+        heartbeatSeq++;
+
+        console.log(`[${new Date().toISOString()}] Heartbeat sent to ${side}: ${Array.from(packet).map(b => b.toString(16).padStart(2, '0')).join('')}`);
+        
+        await deviceInfo.writeCharacteristic.writeValueWithoutResponse(packet);
+    } catch (error) {
+        console.log(`[${new Date().toISOString()}] Failed to send heartbeat to ${side}: ${error}`);
+        await reconnectDevice(deviceInfo, side);
+    }
+}
+
+async function reconnectDevice(deviceInfo, side) {
+    let attempts = 0;
+    while (attempts < MAX_RECONNECT_ATTEMPTS) {
+        try {
+            if (!deviceInfo.device.gatt.connected) {
+                console.log(`Attempting to reconnect ${side} device (attempt ${attempts + 1}/${MAX_RECONNECT_ATTEMPTS})`);
+                await deviceInfo.device.gatt.connect();
+                
+                const service = await deviceInfo.device.gatt.getPrimaryService(SERVICE_UUID);
+                deviceInfo.writeCharacteristic = await service.getCharacteristic(WRITE_CHARACTERISTIC_UUID);
+                deviceInfo.readCharacteristic = await service.getCharacteristic(READ_CHARACTERISTIC_UUID);
+                
+                await deviceInfo.readCharacteristic.startNotifications();
+                deviceInfo.readCharacteristic.addEventListener('characteristicvaluechanged', 
+                    (event) => handleNotification(event, side));
+                
+                if (heartbeatIntervals[side]) {
+                    clearInterval(heartbeatIntervals[side]);
+                }
+                heartbeatIntervals[side] = setInterval(async () => {
+                    await sendHeartbeat(deviceInfo, side);
+                }, HEARTBEAT_INTERVAL);
+                
+                console.log(`Successfully reconnected ${side} device`);
+                document.getElementById('sendTextButton').disabled = false;
+                return true;
+            }
+            return true;
+        } catch (error) {
+            console.log(`Reconnection attempt ${attempts + 1} failed: ${error}`);
+            attempts++;
+            if (attempts < MAX_RECONNECT_ATTEMPTS) {
+                await new Promise(resolve => setTimeout(resolve, RECONNECT_DELAY));
+            }
+        }
+    }
+    console.log(`Failed to reconnect ${side} device after ${MAX_RECONNECT_ATTEMPTS} attempts`);
+    return false;
+}
+
+function setupDeviceListeners(device, side) {
+    device.addEventListener('gattserverdisconnected', (event) => {
+        console.log(`[${new Date().toISOString()}] ${side} GATT Server disconnected`, event);
+    });
+
+    // added all events to listen for just incase
+
+    const characteristicEvents = [
+        'characteristicvaluechanged',
+        'serviceadded',
+        'servicechanged',
+        'serviceremoved',
+        'characteristicadded',
+        'characteristicchanged',
+        'characteristicremoved'
+    ];
+
+    const bluetoothEvents = [
+        'availabilitychanged',
+        'connecting',
+        'connected',
+        'disconnecting',
+        'disconnected',
+        'advertisementreceived'
+    ];
+
+    characteristicEvents.forEach(eventName => {
+        device.addEventListener(eventName, (event) => {
+            console.log(`[${new Date().toISOString()}] ${side} ${eventName} event:`, event);
+            if (event.target && event.target.value) {
+                const data = new Uint8Array(event.target.value.buffer);
+                console.log(`Data received:`, Array.from(data).map(b => b.toString(16).padStart(2, '0')).join(' '));
+            }
+        });
+    });
+
+    bluetoothEvents.forEach(eventName => {
+        device.addEventListener(eventName, (event) => {
+            console.log(`[${new Date().toISOString()}] ${side} Bluetooth ${eventName} event:`, event);
+        });
+    });
+}
+
+let deviceCount = 0;  
+
 async function scanAndConnect() {
     try {
+        deviceCount = 0;  
+        updateStatus('Starting scan...');
+        
+        await new Promise(resolve => setTimeout(resolve, 500));
+        
         const device = await navigator.bluetooth.requestDevice({
             filters: [
                 { namePrefix: leftDevice ? RIGHT_PREFIX : LEFT_PREFIX }
             ],
-            optionalServices: [SERVICE_UUID] 
+            optionalServices: [SERVICE_UUID],
+            acceptAllDevices: false
         });
 
-        updateStatus('Device found. Connecting...');
+        const side = leftDevice ? 'right' : 'left';
+        updateStatus(`Found ${side} device. Waiting to connect...`);
         
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        
+        setupDeviceListeners(device, side);
+        
+        console.log(`Attempting to connect to ${side} device...`);
         const server = await device.gatt.connect();
-        updateStatus('Connected to device');
+        console.log(`GATT server connected for ${side} device`);
+        
+        await new Promise(resolve => setTimeout(resolve, 1000));
         
         const service = await server.getPrimaryService(SERVICE_UUID);
-        const characteristic = await service.getCharacteristic(WRITE_CHARACTERISTIC_UUID);
+        const writeCharacteristic = await service.getCharacteristic(WRITE_CHARACTERISTIC_UUID);
+        const readCharacteristic = await service.getCharacteristic(READ_CHARACTERISTIC_UUID);
         
-        return { device, characteristic };
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        
+        console.log(`Setting up notifications for ${side}...`);
+        await readCharacteristic.startNotifications();
+        readCharacteristic.addEventListener('characteristicvaluechanged', 
+            (event) => handleNotification(event, side));
+
+        const deviceInfo = { 
+            device, 
+            writeCharacteristic,
+            readCharacteristic 
+        };
+
+        if (heartbeatIntervals[side]) {
+            clearInterval(heartbeatIntervals[side]);
+        }
+
+        heartbeatIntervals[side] = setInterval(async () => {
+            await sendHeartbeat(deviceInfo, side);
+        }, HEARTBEAT_INTERVAL);
+        
+        deviceCount++;
+        updateStatus(`${side} device connected. ${deviceCount}/2 devices connected.`);
+        
+        // If we've connected both devices, stop scanning
+        if (deviceCount >= 2) {
+            updateStatus('Both devices connected successfully!');
+            document.getElementById('scanButton').disabled = true;
+            document.getElementById('sendTextButton').disabled = false;
+        }
+        
+        return deviceInfo;
     } catch (error) {
         updateStatus('Error: ' + error);
         throw error;
@@ -111,7 +284,7 @@ async function sendText(deviceInfo, text) {
                 ...packageData  
             ]);
             
-            await deviceInfo.characteristic.writeValue(data);
+            await deviceInfo.writeCharacteristic.writeValue(data);
             updateStatus(`Sent package ${i + 1} of ${totalPackages}`);
             
             await new Promise(resolve => setTimeout(resolve, 50));
@@ -135,11 +308,36 @@ function setupDisconnectListener(device, side) {
     });
 }
 
-document.getElementById('scanButton').addEventListener('click', async () => {
+document.getElementById('scanButton').outerHTML = `
+    <button id="scanLeftButton">Connect Left</button>
+    <button id="scanRightButton" disabled>Connect Right</button>
+`;
+
+document.getElementById('scanLeftButton').addEventListener('click', async () => {
     try {
+        document.getElementById('scanLeftButton').disabled = true;
+        updateStatus('Preparing to scan for left device...');
+        
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        
         updateStatus('Scanning for left device...');
         const left = await scanAndConnect();
         leftDevice = left;
+        
+        document.getElementById('scanRightButton').disabled = false;
+        updateStatus('Left device connected. Please click "Connect Right" to connect right device.');
+    } catch (error) {
+        updateStatus('Error connecting left device: ' + error);
+        document.getElementById('scanLeftButton').disabled = false;
+    }
+});
+
+document.getElementById('scanRightButton').addEventListener('click', async () => {
+    try {
+        document.getElementById('scanRightButton').disabled = true;
+        updateStatus('Preparing to scan for right device...');
+        
+        await new Promise(resolve => setTimeout(resolve, 1000));
         
         updateStatus('Scanning for right device...');
         const right = await scanAndConnect();
@@ -148,7 +346,8 @@ document.getElementById('scanButton').addEventListener('click', async () => {
         document.getElementById('sendTextButton').disabled = false;
         updateStatus('Both devices connected and ready');
     } catch (error) {
-        updateStatus('Error during scanning: ' + error);
+        updateStatus('Error connecting right device: ' + error);
+        document.getElementById('scanRightButton').disabled = false;
     }
 });
 
@@ -174,6 +373,14 @@ document.getElementById('sendTextButton').addEventListener('click', async () => 
 
 async function disconnectDevices() {
     try {
+
+        Object.keys(heartbeatIntervals).forEach(side => {
+            if (heartbeatIntervals[side]) {
+                clearInterval(heartbeatIntervals[side]);
+                heartbeatIntervals[side] = null;
+            }
+        });
+        
         if (leftDevice && leftDevice.device.gatt.connected) {
             await leftDevice.device.gatt.disconnect();
             leftDevice = null;
@@ -213,7 +420,7 @@ async function sendBmpToDevice(deviceInfo, bmpData, isLeft) {
                 ...chunk
             ]);
             
-            await deviceInfo.characteristic.writeValue(packet);
+            await deviceInfo.writeCharacteristic.writeValue(packet);
             updateStatus(`Sent BMP packet ${seq + 1} to ${isLeft ? 'left' : 'right'} device`);
             
             seq = (seq + 1) % 256;
@@ -227,11 +434,11 @@ async function sendBmpToDevice(deviceInfo, bmpData, isLeft) {
             BMP_CRC_COMMAND,
             ...crc
         ]);
-        await deviceInfo.characteristic.writeValue(crcPacket);
+        await deviceInfo.writeCharacteristic.writeValue(crcPacket);
         updateStatus(`Sent CRC check to ${isLeft ? 'left' : 'right'} device`);
         
         const endPacket = new Uint8Array([BMP_END_COMMAND, 0x0d, 0x0e]);
-        await deviceInfo.characteristic.writeValue(endPacket);
+        await deviceInfo.writeCharacteristic.writeValue(endPacket);
         
         updateStatus(`BMP sent successfully to ${isLeft ? 'left' : 'right'} device`);
     } catch (error) {
@@ -240,7 +447,6 @@ async function sendBmpToDevice(deviceInfo, bmpData, isLeft) {
     }
 }
 
-// Add function to handle file inputs
 async function handleBmpFiles() {
     const leftFile = document.getElementById('leftBmpInput').files[0];
     const rightFile = document.getElementById('rightBmpInput').files[0];
@@ -281,3 +487,37 @@ document.addEventListener('DOMContentLoaded', () => {
     
     sendBmpButton.addEventListener('click', handleBmpFiles);
 });
+
+async function testNotifications(deviceInfo, side) {
+    try {
+        console.log(`Testing notifications for ${side} device...`);
+        const isNotifying = await deviceInfo.readCharacteristic.startNotifications();
+        console.log(`Notifications ${isNotifying ? 'are' : 'are not'} active for ${side} device`);
+    } catch (error) {
+        console.log(`Error testing notifications for ${side} device: ${error}`);
+    }
+}
+
+function handleNotification(event, side) {
+    const data = new Uint8Array(event.target.value.buffer);
+    const hexData = Array.from(data).map(b => b.toString(16).padStart(2, '0')).join(' ');
+    const asciiData = Array.from(data).map(b => (b >= 32 && b <= 126) ? String.fromCharCode(b) : '.').join('');
+    
+    console.log(`[${new Date().toISOString()}] Raw data from ${side}:`);
+    console.log(`  Hex: ${hexData}`);
+    console.log(`  ASCII: ${asciiData}`);
+    console.log(`  Decimal: ${Array.from(data)}`);
+    console.log(`  First byte: 0x${data[0].toString(16).padStart(2, '0')}`);
+    
+    let interpretation = "Unknown packet type";
+    if (data[0] === HEARTBEAT_COMMAND) {
+        interpretation = `Heartbeat response (seq: ${data[3]})`;
+    } else if (data[0] === 0xf5) {
+        interpretation = `Status update (type: 0x${data[1].toString(16).padStart(2, '0')})`;
+    }
+    
+    console.log(`  Interpretation: ${interpretation}`);
+    console.log('------------------------');
+}
+
+
